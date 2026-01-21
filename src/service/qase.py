@@ -1,4 +1,5 @@
 from ..support import ConfigManager, Logger, format_links_as_markdown
+from ..api import QaseApiClient
 
 import certifi
 import json
@@ -81,6 +82,14 @@ class QaseService:
         
         # Add custom header for migration
         self.client_v2.default_headers['migration'] = 'true'
+        
+        # Initialize raw HTTP API client for operations that bypass SDK validation
+        # (e.g., creating cases with shared steps)
+        self.api_client = QaseApiClient(
+            base_url=api_host_v1,
+            api_token=config.get('qase.api_token'),
+            logger=logger
+        )
 
     def _get_users(self, limit=100, offset=0):
         try:
@@ -363,9 +372,6 @@ class QaseService:
             
             # Process cases with shared steps - they come as dicts, just need to process steps
             if cases_with_shared:
-                import json
-                import requests
-                
                 cases_for_api = []
                 for case in cases_with_shared:
                     # Case is already a dict from cases.py, just need to process steps
@@ -397,36 +403,8 @@ class QaseService:
                     
                     cases_for_api.append(case_dict)
                 
-                # Send request directly
-                config = self.client.configuration
-                base_url = config.host
-                if not base_url.startswith('http'):
-                    base_url = f"https://{base_url}"
-                url = f"{base_url}/case/{code}/bulk"
-                
-                # Get API token - SDK stores it as 'TokenAuth' in config
-                if hasattr(config, 'api_key') and 'TokenAuth' in config.api_key:
-                    api_key = config.api_key['TokenAuth']
-                else:
-                    api_key = self.config.get('qase.api_token')
-                
-                if not api_key:
-                    self.logger.log("No API token found for creating cases with shared steps", 'error')
-                    return False
-                
-                headers = {
-                    'Token': api_key,
-                    'Content-Type': 'application/json',
-                    'Accept': 'application/json'
-                }
-                
-                payload = {"cases": cases_for_api}
-                response = requests.post(url, headers=headers, json=payload)
-                
-                if response.status_code != 200:
-                    import json
-                    self.logger.log(f"Failed to create cases with shared steps: {response.status_code} - {response.text}", 'error')
-                    self.logger.log(f"Request payload (first case): {json.dumps(cases_for_api[0] if cases_for_api else {}, indent=2, default=str)}", 'error')
+                # Use API client for direct HTTP call (bypasses SDK validation)
+                if not self.api_client.create_cases_bulk(code, cases_for_api):
                     return False
             
             # Process cases without shared steps - use normal API client flow
