@@ -347,12 +347,104 @@ class QaseService:
         api_instance = CasesApi(self.client)
 
         try:
-            # Create a new test cases.
-            api_response = api_instance.bulk(code, TestCasebulk(cases=cases))
-            return api_response.status
+            # Split cases into those with shared steps and those without
+            # Cases with shared steps come as dicts (from cases.py), cases without come as TestCasebulkCasesInner objects
+            cases_with_shared = []
+            cases_without_shared = []
+            
+            for case in cases:
+                # If it's a dict, it has shared steps (cases.py sends dicts for cases with shared steps)
+                if isinstance(case, dict):
+                    cases_with_shared.append(case)
+                else:
+                    # It's a TestCasebulkCasesInner object, no shared steps
+                    cases_without_shared.append(case)
+            
+            
+            # Process cases with shared steps - they come as dicts, just need to process steps
+            if cases_with_shared:
+                import json
+                import requests
+                
+                cases_for_api = []
+                for case in cases_with_shared:
+                    # Case is already a dict from cases.py, just need to process steps
+                    case_dict = case.copy()
+                    
+                    # Process steps: preserve shared step dicts, convert TestStepCreate to dicts
+                    if 'steps' in case_dict and case_dict['steps']:
+                        processed_steps = []
+                        for step in case_dict['steps']:
+                            if isinstance(step, dict) and 'shared' in step:
+                                # Shared step - keep as dict (this is the Qase API format)
+                                processed_steps.append(step)
+                            elif hasattr(step, 'to_dict') and callable(getattr(step, 'to_dict', None)):
+                                # TestStepCreate - convert to dict
+                                step_dict = step.to_dict()
+                                step_dict = {k: v for k, v in step_dict.items() if v is not None}
+                                processed_steps.append(step_dict)
+                            elif isinstance(step, dict):
+                                # Already a dict
+                                step_dict = {k: v for k, v in step.items() if v is not None}
+                                processed_steps.append(step_dict)
+                            else:
+                                # Unknown type, keep as-is
+                                processed_steps.append(step)
+                        case_dict['steps'] = processed_steps
+                    
+                    # Remove None values for cleaner payload
+                    case_dict = {k: v for k, v in case_dict.items() if v is not None}
+                    
+                    cases_for_api.append(case_dict)
+                
+                # Send request directly
+                config = self.client.configuration
+                base_url = config.host
+                if not base_url.startswith('http'):
+                    base_url = f"https://{base_url}"
+                url = f"{base_url}/case/{code}/bulk"
+                
+                # Get API token - SDK stores it as 'TokenAuth' in config
+                if hasattr(config, 'api_key') and 'TokenAuth' in config.api_key:
+                    api_key = config.api_key['TokenAuth']
+                else:
+                    api_key = self.config.get('qase.api_token')
+                
+                if not api_key:
+                    self.logger.log("No API token found for creating cases with shared steps", 'error')
+                    return False
+                
+                headers = {
+                    'Token': api_key,
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json'
+                }
+                
+                payload = {"cases": cases_for_api}
+                response = requests.post(url, headers=headers, json=payload)
+                
+                if response.status_code != 200:
+                    import json
+                    self.logger.log(f"Failed to create cases with shared steps: {response.status_code} - {response.text}", 'error')
+                    self.logger.log(f"Request payload (first case): {json.dumps(cases_for_api[0] if cases_for_api else {}, indent=2, default=str)}", 'error')
+                    return False
+            
+            # Process cases without shared steps - use normal API client flow
+            if cases_without_shared:
+                api_response = api_instance.bulk(code, TestCasebulk(cases=cases_without_shared))
+                if not api_response.status:
+                    self.logger.log(f"Failed to create cases without shared steps", 'error')
+                    return False
+            
+            return True
+                
         except ApiException as e:
             self.logger.log("Exception when calling CasesApi->bulk: %s\n" % e)
             self.logger.log(f"Request payload: {cases}")
+        except Exception as e:
+            self.logger.log(f"Exception when preparing cases: {e}", 'error')
+            import traceback
+            self.logger.log(traceback.format_exc(), 'error')
         return False
 
     def create_run(self, run: list, project_code: str, cases: list = [], milestone_id = None):

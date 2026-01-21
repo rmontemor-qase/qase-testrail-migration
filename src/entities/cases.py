@@ -202,13 +202,27 @@ class Cases:
             data = self._set_milestone(case=case, data=data, code=self.project['code'])
             data = self._set_estimate(case=case, data=data)
 
-            result.append(
-                TestCasebulkCasesInner(
-                    **data
-                )
-            )
+            # Check if this case has shared steps (dicts with 'shared' key in steps)
+            has_shared_steps = False
+            if 'steps' in data and data['steps']:
+                for step in data['steps']:
+                    if isinstance(step, dict) and 'shared' in step:
+                        has_shared_steps = True
+                        break
 
-            self.logger.log("Prepared test: " + data['title'] + " - " + str(data['suite_id']))
+            # If case has shared steps, append as dict (don't create TestCasebulkCasesInner)
+            # because Pydantic will try to convert shared step dicts to TestStepCreate objects
+            if has_shared_steps:
+                result.append(data)
+                self.logger.log(f"Prepared test with shared steps (as dict): {data['title']} - {str(data.get('suite_id', 'N/A'))}")
+            else:
+                # No shared steps - safe to create TestCasebulkCasesInner object
+                result.append(
+                    TestCasebulkCasesInner(
+                        **data
+                    )
+                )
+                self.logger.log("Prepared test: " + data['title'] + " - " + str(data['suite_id']))
         except Exception as e:
             self.logger.log(f'[{self.project["code"]}][Tests] Failed to prepare case {case["title"]}: {e}', 'error')
             self.logger.log(f'[{self.project["code"]}][Tests] Case: {case}',)
@@ -616,36 +630,82 @@ class Cases:
                 steps = []
                 i = 1
                 for step in case[field_name]:
-                    # Process step fields: replace attachments, convert HTML to markdown, format links
-                    action = self.attachments.check_and_replace_attachments(step['content'], self.project['code'])
-                    expected = self.attachments.check_and_replace_attachments(step['expected'], self.project['code'])
-                    input_data = self.attachments.check_and_replace_attachments(step.get('additional_info', ''),
-                                                                                self.project['code'])
-                    
-                    # Convert HTML to markdown for all step fields
-                    action = html_to_markdown(action, remove_html=False) if action else action
-                    expected = html_to_markdown(expected, remove_html=False) if expected else expected
-                    input_data = html_to_markdown(input_data, remove_html=False) if input_data else input_data
+                    # Check if this step references a shared step
+                    if 'shared_step_id' in step and step['shared_step_id']:
+                        shared_step_id = step['shared_step_id']
+                        # Look up the Qase shared step hash from mappings
+                        project_shared_steps = self.mappings.shared_steps.get(self.project['code'], {})
+                        qase_shared_step_hash = project_shared_steps.get(shared_step_id)
+                        
+                        if qase_shared_step_hash:
+                            # Create a shared step reference as a dict (Qase API format)
+                            steps.append({
+                                'shared': qase_shared_step_hash
+                            })
+                            self.logger.log(f'[{self.project["code"]}][Tests] Case {case["title"]} step {i} references shared step TestRail ID {shared_step_id} -> Qase hash {qase_shared_step_hash}')
+                            i += 1
+                        else:
+                            # Shared step not found in mappings, log warning and process as regular step
+                            self.logger.log(f'[{self.project["code"]}][Tests] Case {case["title"]} step {i} references shared step TestRail ID {shared_step_id} but mapping not found. Processing as regular step.', 'warning')
+                            # Fall through to regular step processing below
+                            action = self.attachments.check_and_replace_attachments(step.get('content', ''), self.project['code'])
+                            expected = self.attachments.check_and_replace_attachments(step.get('expected', ''), self.project['code'])
+                            input_data = self.attachments.check_and_replace_attachments(step.get('additional_info', ''),
+                                                                                        self.project['code'])
+                            
+                            # Convert HTML to markdown for all step fields
+                            action = html_to_markdown(action, remove_html=False) if action else action
+                            expected = html_to_markdown(expected, remove_html=False) if expected else expected
+                            input_data = html_to_markdown(input_data, remove_html=False) if input_data else input_data
 
-                    action = action.strip()
-                    expected = expected.strip()
-                    input_data = input_data.strip()
+                            action = action.strip()
+                            expected = expected.strip()
+                            input_data = input_data.strip()
 
-                    if (action != '' or (action == '' and expected != '')):
-                        if action == '' or action == ' ':
-                            action = 'No action'
-                        steps.append(
-                            TestStepCreate(
-                                action=format_links_as_markdown(action),
-                                expected_result=format_links_as_markdown(expected),
-                                data=format_links_as_markdown(input_data),
-                                position=i
-                            )
-                        )
-                        i += 1
+                            if (action != '' or (action == '' and expected != '')):
+                                if action == '' or action == ' ':
+                                    action = 'No action'
+                                steps.append(
+                                    TestStepCreate(
+                                        action=format_links_as_markdown(action),
+                                        expected_result=format_links_as_markdown(expected),
+                                        data=format_links_as_markdown(input_data),
+                                        position=i
+                                    )
+                                )
+                                i += 1
                     else:
-                        self.logger.log(f'[{self.project["code"]}][Tests] Case {case["title"]} has invalid step {step}',
-                                        'warning')
+                        # Regular step processing (no shared_step_id)
+                        # Process step fields: replace attachments, convert HTML to markdown, format links
+                        action = self.attachments.check_and_replace_attachments(step.get('content', ''), self.project['code'])
+                        expected = self.attachments.check_and_replace_attachments(step.get('expected', ''), self.project['code'])
+                        input_data = self.attachments.check_and_replace_attachments(step.get('additional_info', ''),
+                                                                                    self.project['code'])
+                        
+                        # Convert HTML to markdown for all step fields
+                        action = html_to_markdown(action, remove_html=False) if action else action
+                        expected = html_to_markdown(expected, remove_html=False) if expected else expected
+                        input_data = html_to_markdown(input_data, remove_html=False) if input_data else input_data
+
+                        action = action.strip()
+                        expected = expected.strip()
+                        input_data = input_data.strip()
+
+                        if (action != '' or (action == '' and expected != '')):
+                            if action == '' or action == ' ':
+                                action = 'No action'
+                            steps.append(
+                                TestStepCreate(
+                                    action=format_links_as_markdown(action),
+                                    expected_result=format_links_as_markdown(expected),
+                                    data=format_links_as_markdown(input_data),
+                                    position=i
+                                )
+                            )
+                            i += 1
+                        else:
+                            self.logger.log(f'[{self.project["code"]}][Tests] Case {case["title"]} has invalid step {step}',
+                                            'warning')
                 data['steps'] = steps
         return data
 
