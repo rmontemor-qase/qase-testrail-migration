@@ -128,7 +128,7 @@ class Runs:
         if run.get('description'):
             run['description'] = self.attachments.check_and_replace_attachments(run['description'], self.project['code'])
             run['description'] = html_to_markdown(run['description'], remove_html=False)
-            run['description'] = format_links_as_markdown(run['description'])
+            run['description'] = format_links_as_markdown(run['description'], self.project['code'], self.config)
         
         # Load testrail tests from the run ()
         cases_map = await self.__get_cases_for_run(run)
@@ -240,7 +240,7 @@ class Runs:
                 result['comment'] = self.attachments.check_and_replace_attachments(
                     result['comment'], self.project['code'], result_id=result_id, test_id=test_id)
                 result['comment'] = html_to_markdown(result['comment'], remove_html=False)
-                result['comment'] = format_links_as_markdown(result['comment'])
+                result['comment'] = format_links_as_markdown(result['comment'], self.project['code'], self.config)
 
             if result['status_id'] != 3:
                 if result.get('attachment_ids') and len(result['attachment_ids']) > 0:

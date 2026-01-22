@@ -44,7 +44,31 @@ class QaseApiClient:
                     continue
                 else:
                     if self.logger:
-                        self.logger.log(f"Failed to create cases with shared steps: {response.status_code} - {response.text}", 'error')
+                        error_msg = response.text
+                        self.logger.log(f"Failed to create cases with shared steps: {response.status_code} - {error_msg}", 'error')
+                        
+                        # Try to parse error to identify problematic shared steps
+                        try:
+                            error_data = json.loads(error_msg)
+                            if 'errorMessage' in error_data:
+                                error_message = error_data['errorMessage']
+                                self.logger.log(f"Error message: {error_message}", 'error')
+                                
+                                # If it's a shared step error, try to identify which cases are affected
+                                if 'shared step' in error_message.lower() or 'shared steps' in error_message.lower():
+                                    self.logger.log(f"Shared step error detected. Attempting to identify problematic cases...", 'error')
+                                    # Log all shared step hashes in the batch to help identify the issue
+                                    for idx, case in enumerate(cases):
+                                        if 'steps' in case:
+                                            shared_hashes = []
+                                            for step in case.get('steps', []):
+                                                if isinstance(step, dict) and 'shared' in step:
+                                                    shared_hashes.append(step['shared'])
+                                            if shared_hashes:
+                                                self.logger.log(f"Case {idx + 1} (title: {case.get('title', 'Unknown')}) references shared steps: {shared_hashes}", 'error')
+                        except:
+                            pass
+                        
                         if cases:
                             self.logger.log(f"Request payload (first case): {json.dumps(cases[0], indent=2, default=str)}", 'error')
                     return False

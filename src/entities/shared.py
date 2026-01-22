@@ -68,7 +68,7 @@ class SharedSteps:
                 if action:
                     action = self.attachments.check_and_replace_attachments(action, project['code'])
                     action = html_to_markdown(action, remove_html=False)
-                    action = format_links_as_markdown(action)
+                    action = format_links_as_markdown(action, project['code'], self.config)
                 action = action.strip() if action else ''
                 
                 if action == '':
@@ -79,7 +79,7 @@ class SharedSteps:
                 if expected:
                     expected = self.attachments.check_and_replace_attachments(expected, project['code'])
                     expected = html_to_markdown(expected, remove_html=False)
-                    expected = format_links_as_markdown(expected)
+                    expected = format_links_as_markdown(expected, project['code'], self.config)
                 expected = expected.strip() if expected else None
                 
                 processed_steps.append({
@@ -95,6 +95,14 @@ class SharedSteps:
         )
         if id:
             self.mappings.stats.add_entity_count(project['code'], 'shared_steps', 'qase')
+            # Always update the mapping with the hash returned by Qase
+            # This ensures we use the correct hash even if content changed (e.g., after link replacement)
+            old_hash = self.map.get(step['id'])
             self.map[step['id']] = id
+            if old_hash and old_hash != id:
+                self.logger.log(f'[{project["code"]}][Shared Steps] Hash changed for shared step "{step["title"]}" (TestRail ID: {step["id"]}): {old_hash} -> {id}. This may indicate content changed (e.g., after link replacement).', 'warning')
+            self.logger.log(f'[{project["code"]}][Shared Steps] Created shared step: {step["title"]} (TestRail ID: {step["id"]}) -> Qase hash: {id}')
+        else:
+            self.logger.log(f'[{project["code"]}][Shared Steps] Failed to create shared step: {step["title"]} (TestRail ID: {step["id"]}). Cases referencing this shared step will fail.', 'error')
         self.i += 1
         self.logger.print_status(f'[{project["code"]}] Importing shared steps', self.i, cnt, 1)

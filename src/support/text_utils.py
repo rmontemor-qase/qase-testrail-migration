@@ -109,18 +109,25 @@ def convert_single_table(table_lines):
     return markdown_table
 
 
-def format_links_as_markdown(text):
+def format_links_as_markdown(text, project_code=None, config=None):
     """
     Format text by converting TestRail tables to Markdown and formatting URLs as Markdown links.
+    Also replaces TestRail case links with Qase case links.
     
     Args:
         text (str): Text to format
+        project_code (str, optional): Qase project code for replacing TestRail case links
+        config (dict, optional): Config object to get Qase host settings
         
     Returns:
         str: Formatted text with tables converted and URLs as Markdown links
     """
     if text is None:
         return None
+    
+    # Ensure text is a string - don't process dicts or other types
+    if not isinstance(text, str):
+        return text
 
     # First convert TestRail tables to Markdown
     text = convert_testrail_tables_to_markdown(text)
@@ -128,11 +135,171 @@ def format_links_as_markdown(text):
     # Fix numbering
     text = fix_numbering(text)
 
-    # Format URLs as Markdown links
-    url_pattern = re.compile(r'(?<!\]\()(?<!\])\b(http[s]?://[^\s]+)')
-    formatted_text = url_pattern.sub(r'[\1](\1)', text)
+    # Replace TestRail case links with Qase case links if project_code is provided
+    if project_code and config:
+        text = replace_testrail_case_links(text, project_code, config)
+        
+        # Format URLs as Markdown links (this may convert broken Qase URLs to markdown)
+        url_pattern = re.compile(r'(?<!\]\()(?<!\])\b(http[s]?://[^\s]+)')
+        text = url_pattern.sub(r'[\1](\1)', text)
+        
+        # After URL pattern converts plain URLs to markdown, fix any broken Qase links
+        # that were just converted to markdown format
+        text = replace_testrail_case_links(text, project_code, config)
+    else:
+        # Format URLs as Markdown links
+        url_pattern = re.compile(r'(?<!\]\()(?<!\])\b(http[s]?://[^\s]+)')
+        text = url_pattern.sub(r'[\1](\1)', text)
 
-    return formatted_text
+    return text
+
+
+def replace_testrail_case_links(text, project_code, config):
+    """
+    Replace TestRail case links with Qase case links.
+    
+    Args:
+        text (str): Text that may contain TestRail case links
+        project_code (str): Qase project code
+        config: Config object to get Qase and TestRail host settings
+        
+    Returns:
+        str: Text with TestRail case links replaced with Qase case links
+    """
+    if not text or not project_code or not config:
+        return text
+    
+    # Ensure text is a string - don't process dicts or other types
+    if not isinstance(text, str):
+        return text
+    
+    # Get TestRail host from config
+    testrail_host = config.get('testrail.api.host')
+    if not testrail_host:
+        return text
+    
+    # Normalize TestRail host (remove trailing slash, extract base URL)
+    testrail_host = testrail_host.rstrip('/')
+    # Extract domain from URL (e.g., "https://affinipay.testrail.net" -> "affinipay.testrail.net")
+    testrail_domain = re.sub(r'^https?://', '', testrail_host)
+    
+    # Build Qase app URL
+    ssl = 'https://' if (config.get('qase.ssl') is None or config.get('qase.ssl')) else 'http://'
+    main_host = config.get('qase.host') or 'qase.io'
+    
+    # Determine delimiter: use '.' for qase.io (cloud), '-' for enterprise custom domains
+    delimiter = '.'
+    if config.get('qase.enterprise') and main_host != 'qase.io':
+        delimiter = '-'
+    
+    qase_app_url = f'{ssl}app{delimiter}{main_host}'
+    
+    # Pattern 1: Match TestRail case links in markdown format with full URL
+    # Matches: [C123456](https://{testrail_domain}/index.php?/cases/view/123456)
+    # Also handles variations like /index.php?/cases/view/ or index.php?/cases/view/
+    testrail_case_pattern_full = re.compile(
+        rf'\[C(\d+)\]\(https?://{re.escape(testrail_domain)}/index\.php\?/cases/view/(\d+)\)',
+        re.IGNORECASE
+    )
+    
+    def replace_full_link(match):
+        case_id = match.group(2)  # Case ID from the URL (use URL ID as it's authoritative)
+        qase_link = f'[C{case_id}]({qase_app_url}/project/{project_code}?case={case_id})'
+        return qase_link
+    
+    # Pattern 2: Match plain text case references [C123456] that are not already links
+    # This handles cases where the link was removed or never had a link
+    # We need to be careful not to match already-formatted markdown links
+    testrail_case_pattern_text = re.compile(
+        r'(?<!\]\()\[C(\d+)\](?!\()',
+        re.IGNORECASE
+    )
+    
+    def replace_text_reference(match):
+        case_id = match.group(1)
+        qase_link = f'[C{case_id}]({qase_app_url}/project/{project_code}?case={case_id})'
+        return qase_link
+    
+    # Pattern 3: Match TestRail URLs that might be in plain URL format (before markdown conversion)
+    # Matches: https://{testrail_domain}/index.php?/cases/view/123456
+    # But NOT if they're already inside markdown links
+    testrail_case_pattern_url = re.compile(
+        rf'(?<!\]\()(https?://{re.escape(testrail_domain)}/index\.php\?/cases/view/(\d+))',
+        re.IGNORECASE
+    )
+    
+    def replace_url(match):
+        case_id = match.group(2)
+        qase_link = f'[C{case_id}]({qase_app_url}/project/{project_code}?case={case_id})'
+        return qase_link
+    
+    # Pattern 4: Fix broken Qase links that were incorrectly replaced
+    # These are links that have the Qase base URL but still have the TestRail path format
+    # Matches both plain URLs and markdown links with broken Qase format:
+    # - https://app.qase.io/project/index.php?/cases/view/123456
+    # - [C123456](https://app.qase.io/project/index.php?/cases/view/123456)
+    # - [text](https://app.qase.io/project/index.php?/cases/view/123456)
+    # Also handles enterprise domains like app-customdomain.com
+    
+    # Build pattern to match Qase app URL (handles both cloud and enterprise)
+    qase_app_pattern = rf'app{re.escape(delimiter)}{re.escape(main_host)}'
+    
+    # Pattern 4a: Fix broken Qase links in markdown format with [C123456] text
+    broken_qase_pattern_markdown = re.compile(
+        rf'\[C(\d+)\]\(https?://{qase_app_pattern}/project/index\.php\?/cases/view/(\d+)\)',
+        re.IGNORECASE
+    )
+    
+    def fix_broken_link_markdown(match):
+        case_id = match.group(2)  # Use URL ID as authoritative
+        qase_link = f'[C{case_id}]({qase_app_url}/project/{project_code}?case={case_id})'
+        return qase_link
+    
+    # Pattern 4b: Fix broken Qase links in markdown format with arbitrary text [text](broken_url)
+    broken_qase_pattern_markdown_text = re.compile(
+        rf'\[([^\]]+)\]\(https?://{qase_app_pattern}/project/index\.php\?/cases/view/(\d+)\)',
+        re.IGNORECASE
+    )
+    
+    def fix_broken_link_markdown_text(match):
+        link_text = match.group(1)
+        case_id = match.group(2)
+        # Extract case ID from link text if it's in [C123456] format, otherwise use URL ID
+        case_id_match = re.search(r'C(\d+)', link_text, re.IGNORECASE)
+        if case_id_match:
+            case_id = case_id_match.group(1)
+        qase_link = f'[C{case_id}]({qase_app_url}/project/{project_code}?case={case_id})'
+        return qase_link
+    
+    # Pattern 4c: Fix broken Qase links in plain URL format (not in markdown)
+    broken_qase_pattern_url = re.compile(
+        rf'(?<!\]\()(https?://{qase_app_pattern}/project/index\.php\?/cases/view/(\d+))',
+        re.IGNORECASE
+    )
+    
+    def fix_broken_link_url(match):
+        case_id = match.group(2)
+        qase_link = f'[C{case_id}]({qase_app_url}/project/{project_code}?case={case_id})'
+        return qase_link
+    
+    # Apply replacements in order:
+    # 1. First fix any broken Qase links that were incorrectly replaced
+    #    (must be done first, before other patterns process them)
+    #    Order matters: markdown with text first, then markdown with [C], then plain URLs
+    replaced_text = broken_qase_pattern_markdown_text.sub(fix_broken_link_markdown_text, text)
+    replaced_text = broken_qase_pattern_markdown.sub(fix_broken_link_markdown, replaced_text)
+    replaced_text = broken_qase_pattern_url.sub(fix_broken_link_url, replaced_text)
+    
+    # 2. Replace full markdown links
+    replaced_text = testrail_case_pattern_full.sub(replace_full_link, replaced_text)
+    
+    # 3. Then replace plain URLs (in case they weren't converted to markdown yet)
+    replaced_text = testrail_case_pattern_url.sub(replace_url, replaced_text)
+    
+    # 4. Finally, replace plain text references [C123456] that aren't already links
+    replaced_text = testrail_case_pattern_text.sub(replace_text_reference, replaced_text)
+    
+    return replaced_text
 
 
 def fix_numbering(text):

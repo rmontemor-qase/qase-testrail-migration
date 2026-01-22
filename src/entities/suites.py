@@ -101,7 +101,7 @@ class Suites:
     ):
         description = description if description else ""
         description = self.attachments.check_and_replace_attachments(description, qase_code)
-        description = format_links_as_markdown(description)
+        description = format_links_as_markdown(description, qase_code, self.config)
         parent_id = self.suites_map.get(parent_id, None) if parent_id else None
 
         self.suites_map[testrail_suite_id] = await self.pools.qs(

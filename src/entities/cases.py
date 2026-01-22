@@ -101,12 +101,20 @@ class Cases:
                 self.logger.log(
                     f'[{self.project["code"]}][Tests] Importing {cases["size"]} cases from {offset} to {offset + limit} for suite {suite_id}')
                 data = await self._prepare_cases(cases)
+                prepared_count = len(data)
+                if prepared_count != cases['size']:
+                    self.logger.log(f'[{self.project["code"]}][Tests] Warning: Prepared {prepared_count} cases out of {cases["size"]} requested for suite {suite_id} (offset {offset})', 'warning')
                 if data:
                     if self.config.get('qase.enterprise'):
                         time.sleep(5)  # To avoid hitting rate limits
                     status = await self.pools.qs(self.qase.create_cases, self.project['code'], data)
                     if status:
-                        self.mappings.stats.add_entity_count(self.project['code'], 'cases', 'qase', cases['size'])
+                        # Count actual cases created, not requested
+                        self.mappings.stats.add_entity_count(self.project['code'], 'cases', 'qase', prepared_count)
+                    else:
+                        self.logger.log(f'[{self.project["code"]}][Tests] Failed to create {prepared_count} cases in Qase for suite {suite_id} (offset {offset})', 'error')
+                else:
+                    self.logger.log(f'[{self.project["code"]}][Tests] No cases prepared for suite {suite_id} (offset {offset}) - all cases may have failed', 'warning')
                 self.total = self.total + cases['size']
                 self.logger.print_status('[' + self.project['code'] + '] Importing test cases', self.total, self.total,
                                          1)
@@ -125,6 +133,8 @@ class Cases:
         return result
 
     async def _prepare_case(self, case, result):
+        original_id = None
+        safe_id = None
         try:
             original_id = case['id']
             
@@ -153,17 +163,11 @@ class Cases:
                     safe_id = hashed_id % MAX_SAFE_ID  # Limit hash to safe range
                     self.logger.log(f'[{self.project["code"]}][Tests] preserve_ids disabled, original ID {original_id} too large, using hashed ID: {safe_id} for case {case["title"]}')
             
-            # Save mapping of original ID to generated (or same) ID
-            self.mappings.add_case_id_mapping(original_id, safe_id)
-            self.logger.log(f'[{self.project["code"]}][Tests] Created ID mapping: TestRail {original_id} -> Qase {safe_id}')
-            
             # Additional safety check - all IDs must fit in int32
             if safe_id > MAX_SAFE_ID:
                 # If ID is still too large, force it to safe range
                 safe_id = safe_id % MAX_SAFE_ID
                 self.logger.log(f'[{self.project["code"]}][Tests] WARNING: Generated ID was still too large, forced to safe range: {safe_id}')
-                # Update mapping
-                self.mappings.add_case_id_mapping(original_id, safe_id)
             
             data = {
                 'id': safe_id,
@@ -186,7 +190,7 @@ class Cases:
             if case.get('description'):
                 description = self.attachments.check_and_replace_attachments(case['description'], self.project['code'])
                 description = html_to_markdown(description, remove_html=False)
-                description = format_links_as_markdown(description)
+                description = format_links_as_markdown(description, self.project['code'], self.config)
                 data['description'] = description
                 self.logger.log(f'[{self.project["code"]}][Tests] Processed description field for case {case["title"]}')
             
@@ -214,19 +218,42 @@ class Cases:
             # because Pydantic will try to convert shared step dicts to TestStepCreate objects
             if has_shared_steps:
                 result.append(data)
+                # Save mapping only after successful preparation
+                if original_id and safe_id:
+                    self.mappings.add_case_id_mapping(original_id, safe_id)
+                    self.logger.log(f'[{self.project["code"]}][Tests] Created ID mapping: TestRail {original_id} -> Qase {safe_id}')
                 self.logger.log(f"Prepared test with shared steps (as dict): {data['title']} - {str(data.get('suite_id', 'N/A'))}")
             else:
                 # No shared steps - safe to create TestCasebulkCasesInner object
-                result.append(
-                    TestCasebulkCasesInner(
-                        **data
+                try:
+                    result.append(
+                        TestCasebulkCasesInner(
+                            **data
+                        )
                     )
-                )
-                self.logger.log("Prepared test: " + data['title'] + " - " + str(data['suite_id']))
+                    # Save mapping only after successful preparation
+                    if original_id and safe_id:
+                        self.mappings.add_case_id_mapping(original_id, safe_id)
+                        self.logger.log(f'[{self.project["code"]}][Tests] Created ID mapping: TestRail {original_id} -> Qase {safe_id}')
+                    self.logger.log("Prepared test: " + data['title'] + " - " + str(data['suite_id']))
+                except Exception as validation_error:
+                    # If validation fails, try to add as dict anyway (for cases with complex data)
+                    self.logger.log(f'[{self.project["code"]}][Tests] Validation failed for case {data["title"]}, adding as dict: {validation_error}', 'warning')
+                    result.append(data)
+                    # Save mapping only after successful preparation
+                    if original_id and safe_id:
+                        self.mappings.add_case_id_mapping(original_id, safe_id)
+                        self.logger.log(f'[{self.project["code"]}][Tests] Created ID mapping: TestRail {original_id} -> Qase {safe_id}')
+                    self.logger.log(f"Prepared test (as dict due to validation): {data['title']} - {str(data.get('suite_id', 'N/A'))}")
         except Exception as e:
-            self.logger.log(f'[{self.project["code"]}][Tests] Failed to prepare case {case["title"]}: {e}', 'error')
-            self.logger.log(f'[{self.project["code"]}][Tests] Case: {case}',)
-            self.logger.log(f'[{self.project["code"]}][Tests] Data: {data}', )
+            import traceback
+            self.logger.log(f'[{self.project["code"]}][Tests] Failed to prepare case {case.get("title", "Unknown")} (ID: {case.get("id", "Unknown")}): {e}', 'error')
+            self.logger.log(f'[{self.project["code"]}][Tests] Traceback: {traceback.format_exc()}', 'error')
+            # Try to log case data if available
+            try:
+                self.logger.log(f'[{self.project["code"]}][Tests] Case ID: {case.get("id")}, Title: {case.get("title")}', 'error')
+            except:
+                pass
 
     def _set_refs(self, case: dict, data: dict) -> dict:
         if not (self.mappings.refs_id and case.get('refs') and self.config.get('tests.refs.enable')):
@@ -481,7 +508,7 @@ class Cases:
                     else:
                         field_value = str(self.attachments.check_and_replace_attachments(case[field_name], self.project['code']))
                         field_value = html_to_markdown(field_value, remove_html=False)
-                        field_value = format_links_as_markdown(field_value)
+                        field_value = format_links_as_markdown(field_value, self.project['code'], self.config)
                         
                         if normalized_name == 'preconds':
                             data['preconditions'] = field_value
@@ -579,7 +606,7 @@ class Cases:
                         # Handle non-dropdown fields (text, number, etc.)
                         field_value = str(self.attachments.check_and_replace_attachments(case[field_name], self.project['code']))
                         field_value = html_to_markdown(field_value, remove_html=False)
-                        field_value = format_links_as_markdown(field_value)
+                        field_value = format_links_as_markdown(field_value, self.project['code'], self.config)
                         
                         # Special handling for preconds field - only set preconditions system field, skip custom field
                         if normalized_name == 'preconds':
@@ -615,7 +642,7 @@ class Cases:
                             action = 'No action'
                         steps.append(
                             TestStepCreate(
-                                action=format_links_as_markdown(action),
+                                action=format_links_as_markdown(action, self.project['code'], self.config),
                                 expected_result=None,
                                 position=i
                             )
@@ -667,9 +694,9 @@ class Cases:
                                     action = 'No action'
                                 steps.append(
                                     TestStepCreate(
-                                        action=format_links_as_markdown(action),
-                                        expected_result=format_links_as_markdown(expected),
-                                        data=format_links_as_markdown(input_data),
+                                        action=format_links_as_markdown(action, self.project['code'], self.config),
+                                        expected_result=format_links_as_markdown(expected, self.project['code'], self.config),
+                                        data=format_links_as_markdown(input_data, self.project['code'], self.config),
                                         position=i
                                     )
                                 )
@@ -696,9 +723,9 @@ class Cases:
                                 action = 'No action'
                             steps.append(
                                 TestStepCreate(
-                                    action=format_links_as_markdown(action),
-                                    expected_result=format_links_as_markdown(expected),
-                                    data=format_links_as_markdown(input_data),
+                                    action=format_links_as_markdown(action, self.project['code'], self.config),
+                                    expected_result=format_links_as_markdown(expected, self.project['code'], self.config),
+                                    data=format_links_as_markdown(input_data, self.project['code'], self.config),
                                     position=i
                                 )
                             )

@@ -380,10 +380,15 @@ class QaseService:
                     # Process steps: preserve shared step dicts, convert TestStepCreate to dicts
                     if 'steps' in case_dict and case_dict['steps']:
                         processed_steps = []
-                        for step in case_dict['steps']:
+                        invalid_shared_steps = []
+                        for step_idx, step in enumerate(case_dict['steps']):
                             if isinstance(step, dict) and 'shared' in step:
                                 # Shared step - keep as dict (this is the Qase API format)
+                                # Validate that shared step hash exists
+                                shared_hash = step['shared']
                                 processed_steps.append(step)
+                                # Note: We can't validate shared step existence here without API call,
+                                # but we'll catch it in the API response
                             elif hasattr(step, 'to_dict') and callable(getattr(step, 'to_dict', None)):
                                 # TestStepCreate - convert to dict
                                 step_dict = step.to_dict()
@@ -404,8 +409,34 @@ class QaseService:
                     cases_for_api.append(case_dict)
                 
                 # Use API client for direct HTTP call (bypasses SDK validation)
+                # If bulk creation fails, try to create cases individually to identify problematic ones
                 if not self.api_client.create_cases_bulk(code, cases_for_api):
-                    return False
+                    self.logger.log(f"Bulk creation failed. Attempting to create cases individually to identify problematic ones...", 'warning')
+                    successful_count = 0
+                    failed_count = 0
+                    for case in cases_for_api:
+                        try:
+                            if self.api_client.create_cases_bulk(code, [case]):
+                                successful_count += 1
+                            else:
+                                failed_count += 1
+                                # Log which case failed
+                                case_title = case.get('title', 'Unknown')
+                                shared_hashes = []
+                                if 'steps' in case:
+                                    for step in case.get('steps', []):
+                                        if isinstance(step, dict) and 'shared' in step:
+                                            shared_hashes.append(step['shared'])
+                                self.logger.log(f"Failed to create case: {case_title} (ID: {case.get('id', 'Unknown')})", 'error')
+                                if shared_hashes:
+                                    self.logger.log(f"  Case references shared steps: {shared_hashes}", 'error')
+                        except Exception as e:
+                            failed_count += 1
+                            self.logger.log(f"Exception creating case individually: {e}", 'error')
+                    
+                    self.logger.log(f"Individual creation results: {successful_count} succeeded, {failed_count} failed out of {len(cases_for_api)} total", 'warning')
+                    # Return True if at least some cases were created
+                    return successful_count > 0
             
             # Process cases without shared steps - use normal API client flow
             if cases_without_shared:
@@ -511,7 +542,7 @@ class QaseService:
                             "case_id": cases_map[result['test_id']]['qase_case_id'],
                             "status": status,
                             "time_ms": elapsed*1000,  # converting to milliseconds
-                            "comment": format_links_as_markdown(str(result['comment']))
+                            "comment": format_links_as_markdown(str(result['comment']), qase_code, self.config)
                         }
 
                         if 'attachments' in result and len(result['attachments']) > 0:
@@ -607,7 +638,7 @@ class QaseService:
                             title=case_title,
                             testops_id=cases_map[result['test_id']]['qase_case_id'],
                             execution=execution,
-                            message=format_links_as_markdown(str(result['comment'])) if result.get('comment') else None
+                            message=format_links_as_markdown(str(result['comment']), qase_code, self.config) if result.get('comment') else None
                         )
 
                         # Handle attachments
@@ -808,8 +839,21 @@ class QaseService:
             )
 
         api_instance = SharedStepsApi(self.client)
-        api_response = api_instance.create_shared_step(project_code, SharedStepCreate(title=title, steps=inner_steps))
-        return api_response.result.hash
+        try:
+            api_response = api_instance.create_shared_step(project_code, SharedStepCreate(title=title, steps=inner_steps))
+            if api_response and api_response.result and api_response.result.hash:
+                return api_response.result.hash
+            else:
+                self.logger.log(f'Failed to create shared step "{title}": API response missing hash', 'error')
+                return None
+        except Exception as e:
+            # If shared step already exists or creation fails, log the error
+            error_msg = str(e)
+            if 'already exists' in error_msg.lower() or 'duplicate' in error_msg.lower():
+                self.logger.log(f'Shared step "{title}" may already exist in Qase. Error: {error_msg}', 'warning')
+            else:
+                self.logger.log(f'Failed to create shared step "{title}": {error_msg}', 'error')
+            return None
 
     def check_field_update_needed(self, field, existing_field, mappings) -> tuple[bool, dict]:
         """
