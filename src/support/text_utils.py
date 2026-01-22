@@ -207,7 +207,19 @@ def replace_testrail_case_links(text, project_code, config):
         qase_link = f'[C{case_id}]({qase_app_url}/project/{project_code}?case={case_id})'
         return qase_link
     
-    # Pattern 2: Match plain text case references [C123456] that are not already links
+    # Pattern 2: Match TestRail case links with relative URLs (no domain)
+    # Matches: [C123456](index.php?/cases/view/123456) or [C123456](/index.php?/cases/view/123456)
+    testrail_case_pattern_relative = re.compile(
+        r'\[C(\d+)\]\(/?index\.php\?/cases/view/(\d+)\)',
+        re.IGNORECASE
+    )
+    
+    def replace_relative_link(match):
+        case_id = match.group(2)  # Use URL ID as authoritative
+        qase_link = f'[C{case_id}]({qase_app_url}/project/{project_code}?case={case_id})'
+        return qase_link
+    
+    # Pattern 3: Match plain text case references [C123456] that are not already links
     # This handles cases where the link was removed or never had a link
     # We need to be careful not to match already-formatted markdown links
     testrail_case_pattern_text = re.compile(
@@ -220,7 +232,7 @@ def replace_testrail_case_links(text, project_code, config):
         qase_link = f'[C{case_id}]({qase_app_url}/project/{project_code}?case={case_id})'
         return qase_link
     
-    # Pattern 3: Match TestRail URLs that might be in plain URL format (before markdown conversion)
+    # Pattern 4: Match TestRail URLs that might be in plain URL format (before markdown conversion)
     # Matches: https://{testrail_domain}/index.php?/cases/view/123456
     # But NOT if they're already inside markdown links
     testrail_case_pattern_url = re.compile(
@@ -229,6 +241,18 @@ def replace_testrail_case_links(text, project_code, config):
     )
     
     def replace_url(match):
+        case_id = match.group(2)
+        qase_link = f'[C{case_id}]({qase_app_url}/project/{project_code}?case={case_id})'
+        return qase_link
+    
+    # Pattern 5: Match plain relative TestRail URLs (not in markdown, no domain)
+    # Matches: index.php?/cases/view/123456 or /index.php?/cases/view/123456
+    testrail_case_pattern_relative_url = re.compile(
+        r'(?<!\]\()(/?index\.php\?/cases/view/(\d+))',
+        re.IGNORECASE
+    )
+    
+    def replace_relative_url(match):
         case_id = match.group(2)
         qase_link = f'[C{case_id}]({qase_app_url}/project/{project_code}?case={case_id})'
         return qase_link
@@ -290,13 +314,19 @@ def replace_testrail_case_links(text, project_code, config):
     replaced_text = broken_qase_pattern_markdown.sub(fix_broken_link_markdown, replaced_text)
     replaced_text = broken_qase_pattern_url.sub(fix_broken_link_url, replaced_text)
     
-    # 2. Replace full markdown links
+    # 2. Replace full markdown links with full TestRail URLs
     replaced_text = testrail_case_pattern_full.sub(replace_full_link, replaced_text)
     
-    # 3. Then replace plain URLs (in case they weren't converted to markdown yet)
+    # 3. Replace markdown links with relative TestRail URLs (no domain)
+    replaced_text = testrail_case_pattern_relative.sub(replace_relative_link, replaced_text)
+    
+    # 4. Then replace plain full URLs (in case they weren't converted to markdown yet)
     replaced_text = testrail_case_pattern_url.sub(replace_url, replaced_text)
     
-    # 4. Finally, replace plain text references [C123456] that aren't already links
+    # 5. Replace plain relative URLs (no domain, not in markdown)
+    replaced_text = testrail_case_pattern_relative_url.sub(replace_relative_url, replaced_text)
+    
+    # 6. Finally, replace plain text references [C123456] that aren't already links
     replaced_text = testrail_case_pattern_text.sub(replace_text_reference, replaced_text)
     
     return replaced_text
