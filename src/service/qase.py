@@ -811,10 +811,18 @@ class QaseService:
         }
 
         if description:
-            data['description']: description
+            data['description'] = description
 
         if due_date:
             data['due_date'] = due_date
+
+        # Convert boolean status to Qase status string
+        # If status is True (milestone is completed in TestRail), set to "completed"
+        # Otherwise, leave as None (active milestone)
+        if status is True:
+            data['status'] = 'completed'
+        elif status is False:
+            data['status'] = 'active'
 
         api_instance = MilestonesApi(self.client)
         api_response = api_instance.create_milestone(
