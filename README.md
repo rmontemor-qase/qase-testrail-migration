@@ -93,6 +93,9 @@ Required fields to fill:
 - `tests.fields` - List of fields to migrate. If empty, migrator will migrate all fields. *Optional*
 - `tests.refs.enable` - If set to `true` migrator will add references to TestRail test cases. *Optional*
 - `tests.refs.url` - URL of TestRail instance. *Optional*
+- `tests.external_issues.enable` - If set to `true` migrator will attach JIRA issues to Qase test cases. *Optional* See [External Issues documentation](docs/EXTERNAL_ISSUES.md)
+- `tests.external_issues.type` - Type of external issue system (`jira-cloud` or `jira-server`). *Default: jira-cloud*
+- `tests.external_issues.batch_size` - Number of cases to process in each batch when attaching external issues. *Default: 50*
 
 ### 3. Prepare system fields
 

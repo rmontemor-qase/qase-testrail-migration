@@ -29,6 +29,11 @@
         "refs": {
             "enable": true,
             "url": "http://localhost:8899/"
+        },
+        "external_issues": {
+            "enable": false,
+            "type": "jira-cloud",
+            "batch_size": 50
         }
     },
     "runs": {

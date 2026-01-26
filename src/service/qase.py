@@ -1055,3 +1055,43 @@ class QaseService:
         except Exception as e:
             self.logger.log(f'[Qase] Unexpected error when getting field {field_id}: {e}', 'error')
             return None
+
+    def attach_external_issues(self, project_code: str, external_issue_type: str, links: list) -> bool:
+        """
+        Attach external issues (e.g., JIRA) to Qase test cases.
+        
+        Args:
+            project_code: Qase project code
+            external_issue_type: Type of external issue (e.g., "jira-cloud", "jira-server")
+            links: List of dicts with structure:
+                   [{"case_id": 123, "external_issues": ["PROJ-456", "PROJ-789"]}, ...]
+        
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        if not links:
+            return True
+        
+        try:
+            # Use raw API client for this endpoint
+            # Note: base_url already includes /v1, so we don't need to add it again
+            url = f'/case/{project_code}/external-issue/attach'
+            payload = {
+                'type': external_issue_type,
+                'links': links
+            }
+            
+            response = self.api_client._request('POST', url, json=payload)
+            
+            if response and response.get('status'):
+                self.logger.log(f'[{project_code}][External Issues] Successfully attached {len(links)} external issue link(s)')
+                return True
+            else:
+                error_msg = response.get('error', 'Unknown error') if response else 'No response'
+                self.logger.log(f'[{project_code}][External Issues] Failed to attach external issues: {error_msg}', 'error')
+                return False
+                
+        except Exception as e:
+            self.logger.log(f'[{project_code}][External Issues] Exception when attaching external issues: {e}', 'error')
+            self.logger.log(f'[{project_code}][External Issues] Payload: {json.dumps(payload, indent=2)}', 'error')
+            return False

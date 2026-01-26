@@ -19,6 +19,56 @@ class QaseApiClient:
             'Accept': 'application/json'
         }
     
+    def _request(self, method: str, endpoint: str, json: Dict[str, Any] = None) -> Dict[str, Any]:
+        """Make a generic HTTP request to the Qase API."""
+        url = f"{self.base_url}{endpoint}"
+        
+        for attempt in range(self.max_retries + 1):
+            try:
+                if method.upper() == 'POST':
+                    response = requests.post(url, headers=self.headers, json=json)
+                elif method.upper() == 'GET':
+                    response = requests.get(url, headers=self.headers)
+                elif method.upper() == 'PUT':
+                    response = requests.put(url, headers=self.headers, json=json)
+                elif method.upper() == 'PATCH':
+                    response = requests.patch(url, headers=self.headers, json=json)
+                elif method.upper() == 'DELETE':
+                    response = requests.delete(url, headers=self.headers)
+                else:
+                    raise ValueError(f"Unsupported HTTP method: {method}")
+                
+                if response.status_code == 200:
+                    return response.json()
+                elif response.status_code == 401:
+                    if self.logger:
+                        self.logger.log(f"Authentication failed: {response.status_code} - {response.text}", 'error')
+                    return {'status': False, 'error': 'Authentication failed'}
+                elif response.status_code >= 500 and attempt < self.max_retries:
+                    if self.logger:
+                        self.logger.log(f"Server error ({response.status_code}), retrying... (attempt {attempt + 1}/{self.max_retries})")
+                    import time
+                    time.sleep(self.backoff_factor * (2 ** attempt))
+                    continue
+                else:
+                    if self.logger:
+                        self.logger.log(f"Request failed: {response.status_code} - {response.text}", 'error')
+                    return {'status': False, 'error': response.text}
+                    
+            except requests.exceptions.RequestException as e:
+                if attempt < self.max_retries:
+                    if self.logger:
+                        self.logger.log(f"Request exception, retrying... (attempt {attempt + 1}/{self.max_retries}): {str(e)}")
+                    import time
+                    time.sleep(self.backoff_factor * (2 ** attempt))
+                    continue
+                else:
+                    if self.logger:
+                        self.logger.log(f"Request failed after {self.max_retries} retries: {str(e)}", 'error')
+                    return {'status': False, 'error': str(e)}
+        
+        return {'status': False, 'error': 'Max retries exceeded'}
+    
     def create_cases_bulk(self, project_code: str, cases: List[Dict[str, Any]]) -> bool:
         """Create test cases in bulk (used for cases with shared steps)."""
         url = f"{self.base_url}/case/{project_code}/bulk"

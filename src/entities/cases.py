@@ -40,12 +40,16 @@ class Cases:
         self.logger.divider()
 
         self.project = None
+        # Store JIRA links for attaching after case creation
+        self.jira_links = []
 
     def import_cases(self, project: dict):
         return asyncio.run(self.import_cases_async(project))
 
     async def import_cases_async(self, project: dict):
         self.project = project
+        # Reset JIRA links for this project
+        self.jira_links = []
 
         async with asyncio.TaskGroup() as tg:
             if self.project['suite_mode'] in (2, 3):
@@ -78,6 +82,10 @@ class Cases:
                 self.logger.log(f'[{self.project["code"]}][Tests] All generated IDs are within safe range (≤ {MAX_SAFE_ID})')
         else:
             self.logger.log(f'[{self.project["code"]}][Tests] No ID mappings created')
+        
+        # Attach JIRA issues after all cases have been created
+        if self.jira_links and self.config.get('tests.external_issues.enable'):
+            await self._attach_jira_issues()
 
     async def import_cases_for_suite(self, suite_id):
         offset = 0
@@ -205,6 +213,16 @@ class Cases:
             data = self._set_refs(case=case, data=data)
             data = self._set_milestone(case=case, data=data, code=self.project['code'])
             data = self._set_estimate(case=case, data=data)
+            
+            # Store JIRA issues for later attachment (if any)
+            if '_jira_issues' in data and data['_jira_issues']:
+                jira_issues = data.pop('_jira_issues')  # Remove from case data
+                # Store with case ID for later attachment
+                self.jira_links.append({
+                    'case_id': safe_id,
+                    'external_issues': jira_issues
+                })
+                self.logger.log(f'[{self.project["code"]}][Tests] Stored JIRA issues for case {safe_id}: {jira_issues}')
 
             # Check if this case has shared steps (dicts with 'shared' key in steps)
             has_shared_steps = False
@@ -264,6 +282,15 @@ class Cases:
 
         processed_refs = [self._get_ref(ref, url) for ref in refs]
         data['custom_field'][str(self.mappings.refs_id)] = '\n'.join(processed_refs)
+        
+        # Extract JIRA issue IDs if external issues feature is enabled
+        if self.config.get('tests.external_issues.enable'):
+            jira_ids = self._extract_jira_issue_ids(refs)
+            if jira_ids:
+                # Store for later attachment (will be attached after case creation)
+                data['_jira_issues'] = jira_ids
+                self.logger.log(f'[{self.project["code"]}][Tests] Extracted JIRA issues from case {case.get("title", "Unknown")}: {jira_ids}')
+        
         return data
 
     @staticmethod
@@ -273,6 +300,38 @@ class Cases:
         else:
             link_url = quote(f"{url}/{ref}", safe="/:")
         return f"[{ref}]({link_url})"
+    
+    @staticmethod
+    def _extract_jira_issue_ids(refs: List[str]) -> List[str]:
+        """
+        Extract JIRA issue IDs from refs list.
+        JIRA issue IDs typically follow the pattern: PROJECT-123, ABC-456, etc.
+        
+        Args:
+            refs: List of ref strings (may include URLs or just issue IDs)
+        
+        Returns:
+            List of JIRA issue IDs
+        """
+        jira_ids = []
+        # Pattern to match JIRA issue IDs: one or more uppercase letters, followed by dash and numbers
+        # Examples: PROJ-123, ABC-456, VTTP-569
+        jira_pattern = re.compile(r'\b([A-Z][A-Z0-9]+-\d+)\b')
+        
+        for ref in refs:
+            # Extract JIRA IDs from the ref string (handles URLs and plain issue IDs)
+            matches = jira_pattern.findall(ref)
+            jira_ids.extend(matches)
+        
+        # Return unique IDs, preserving order
+        seen = set()
+        unique_ids = []
+        for jira_id in jira_ids:
+            if jira_id not in seen:
+                seen.add(jira_id)
+                unique_ids.append(jira_id)
+        
+        return unique_ids
 
     def _collect_attachment_hashes_from_text_fields(self, case: dict, data: dict) -> set:
         """
@@ -896,3 +955,50 @@ class Cases:
                 break
         
         return field_name
+    
+    async def _attach_jira_issues(self):
+        """
+        Attach JIRA issues to cases in batches.
+        Qase API supports batch attachment of external issues.
+        """
+        if not self.jira_links:
+            return
+        
+        self.logger.log(f'[{self.project["code"]}][External Issues] Attaching JIRA issues to {len(self.jira_links)} cases')
+        
+        # Get external issue type from config (default to jira-cloud)
+        external_issue_type = self.config.get('tests.external_issues.type')
+        if not external_issue_type:
+            external_issue_type = 'jira-cloud'
+        
+        # Get batch size from config (default to 50)
+        batch_size = self.config.get('tests.external_issues.batch_size')
+        if not batch_size:
+            batch_size = 50
+        
+        # Process in batches
+        total_attached = 0
+        total_failed = 0
+        
+        for i in range(0, len(self.jira_links), batch_size):
+            batch = self.jira_links[i:i + batch_size]
+            
+            try:
+                success = await self.pools.qs(
+                    self.qase.attach_external_issues,
+                    self.project['code'],
+                    external_issue_type,
+                    batch
+                )
+                
+                if success:
+                    total_attached += len(batch)
+                    self.logger.log(f'[{self.project["code"]}][External Issues] Successfully attached batch {i//batch_size + 1} ({len(batch)} cases)')
+                else:
+                    total_failed += len(batch)
+                    self.logger.log(f'[{self.project["code"]}][External Issues] Failed to attach batch {i//batch_size + 1} ({len(batch)} cases)', 'error')
+            except Exception as e:
+                total_failed += len(batch)
+                self.logger.log(f'[{self.project["code"]}][External Issues] Exception attaching batch {i//batch_size + 1}: {e}', 'error')
+        
+        self.logger.log(f'[{self.project["code"]}][External Issues] Attachment complete: {total_attached} succeeded, {total_failed} failed')
