@@ -444,6 +444,19 @@ class QaseService:
                 if not api_response.status:
                     self.logger.log(f"Failed to create cases without shared steps", 'error')
                     return False
+                
+                # Check how many cases were actually created
+                created_count = 0
+                if api_response.result:
+                    if hasattr(api_response.result, 'ids') and api_response.result.ids:
+                        created_count = len(api_response.result.ids)
+                    elif hasattr(api_response.result, 'id') and api_response.result.id:
+                        created_count = 1
+                
+                if created_count > 0 and created_count != len(cases_without_shared):
+                    self.logger.log(f"WARNING: Only {created_count} out of {len(cases_without_shared)} cases without shared steps were created successfully!", 'warning')
+                elif created_count == 0:
+                    self.logger.log(f"WARNING: API returned success but no cases were created! Response status: {api_response.status}", 'warning')
             
             return True
                 

@@ -79,8 +79,38 @@ class QaseApiClient:
                 response = requests.post(url, headers=self.headers, json=payload)
                 
                 if response.status_code == 200:
-                    if self.logger:
-                        self.logger.log(f"Successfully created {len(cases)} cases with shared steps")
+                    # Parse response to check how many cases were actually created
+                    try:
+                        response_data = response.json()
+                        # Qase API returns result.ids array with created case IDs
+                        created_count = 0
+                        if isinstance(response_data, dict):
+                            if 'result' in response_data and isinstance(response_data['result'], dict):
+                                if 'ids' in response_data['result']:
+                                    created_count = len(response_data['result']['ids'])
+                                elif 'id' in response_data['result']:
+                                    # Single case created
+                                    created_count = 1
+                            elif 'ids' in response_data:
+                                created_count = len(response_data['ids'])
+                        
+                        if created_count > 0:
+                            if created_count != len(cases):
+                                if self.logger:
+                                    self.logger.log(f"WARNING: Only {created_count} out of {len(cases)} cases were created successfully!", 'warning')
+                                    self.logger.log(f"Response: {response.text[:500]}", 'warning')
+                            else:
+                                if self.logger:
+                                    self.logger.log(f"Successfully created {created_count} cases with shared steps")
+                        else:
+                            # No cases created despite 200 response
+                            if self.logger:
+                                self.logger.log(f"WARNING: API returned 200 but no cases were created! Response: {response.text[:500]}", 'warning')
+                    except Exception as e:
+                        # If we can't parse response, log it for debugging
+                        if self.logger:
+                            self.logger.log(f"Successfully created {len(cases)} cases with shared steps (could not parse response: {e})")
+                    
                     return True
                 elif response.status_code == 401:
                     if self.logger:
