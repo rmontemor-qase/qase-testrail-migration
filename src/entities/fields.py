@@ -64,8 +64,20 @@ class Fields:
                 else:
                     self.logger.log(f'[Fields] Skipping custom field: {field["name"]}')
 
-                if field['type_id'] == 10:
-                    self.mappings.step_fields.append(field['name'])
+                # Detect step fields dynamically by checking field configuration
+                # Step fields have specific config options: has_expected, has_additional, or has_reference
+                # These options are unique to step fields and indicate the field stores step data
+                if field.get('configs'):
+                    for config in field['configs']:
+                        options = config.get('options', {})
+                        # Check if this is a step field by looking for step-specific options
+                        if (options.get('has_expected') is not None or 
+                            options.get('has_additional') is not None or
+                            options.get('has_reference') is not None):
+                            # This is a step field - add to step_fields list
+                            if field['name'] not in self.mappings.step_fields:
+                                self.mappings.step_fields.append(field['name'])
+                            break
                 self.logger.print_status('Importing custom fields', i, total)
 
         await self._create_refs_field(qase_custom_fields)

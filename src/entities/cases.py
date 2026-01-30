@@ -185,6 +185,7 @@ class Cases:
                 'author_id': self.mappings.get_user_id(case['created_by']),
                 'steps': [],
                 'attachments': [],
+                'params': [],  # Must be empty array, not None
                 'is_flaky': 0,
                 'custom_field': {},
             }
@@ -244,6 +245,12 @@ class Cases:
             else:
                 # No shared steps - safe to create TestCasebulkCasesInner object
                 try:
+                    # Ensure params and parameters are always arrays, not None (Pydantic might default to None)
+                    # Pydantic models serialize None as null in JSON, but Qase API requires empty arrays
+                    if 'params' not in data or data.get('params') is None:
+                        data['params'] = []
+                    if 'parameters' not in data or data.get('parameters') is None:
+                        data['parameters'] = []
                     result.append(
                         TestCasebulkCasesInner(
                             **data
@@ -265,8 +272,27 @@ class Cases:
                     self.logger.log(f"Prepared test (as dict due to validation): {data['title']} - {str(data.get('suite_id', 'N/A'))}")
         except Exception as e:
             import traceback
+            import json
             self.logger.log(f'[{self.project["code"]}][Tests] Failed to prepare case {case.get("title", "Unknown")} (ID: {case.get("id", "Unknown")}): {e}', 'error')
             self.logger.log(f'[{self.project["code"]}][Tests] Traceback: {traceback.format_exc()}', 'error')
+            # Log the data that was prepared up to the point of failure
+            try:
+                if 'data' in locals() and data:
+                    payload_dict = data.copy()
+                    # Convert TestStepCreate objects to dicts for logging
+                    if 'steps' in payload_dict and payload_dict['steps']:
+                        steps_list = []
+                        for step in payload_dict['steps']:
+                            if hasattr(step, 'to_dict'):
+                                steps_list.append(step.to_dict())
+                            elif isinstance(step, dict):
+                                steps_list.append(step)
+                            else:
+                                steps_list.append(str(step))
+                        payload_dict['steps'] = steps_list
+                    self.logger.log(f'[{self.project["code"]}][Tests] PAYLOAD (failed preparation) for case "{case.get("title", "Unknown")}": {json.dumps(payload_dict, indent=2, default=str)}')
+            except Exception as log_error:
+                self.logger.log(f'[{self.project["code"]}][Tests] Could not log payload: {log_error}', 'error')
             # Try to log case data if available
             try:
                 self.logger.log(f'[{self.project["code"]}][Tests] Case ID: {case.get("id")}, Title: {case.get("title")}', 'error')
@@ -371,7 +397,12 @@ class Cases:
         
         # Collect from step fields
         for field_name in case:
-            if field_name.startswith('custom_') and field_name[len('custom_'):] in self.mappings.step_fields and case[field_name]:
+            normalized_name = field_name[len('custom_'):] if field_name.startswith('custom_') else field_name
+            # Check base name (without project suffix) for project-specific step fields
+            base_name = normalized_name
+            if normalized_name.endswith(f"_{self.project['code']}"):
+                base_name = normalized_name[:-len(f"_{self.project['code']}")]
+            if field_name.startswith('custom_') and base_name in self.mappings.step_fields and case[field_name]:
                 for step in case[field_name]:
                     if 'content' in step and step['content']:
                         attachment_ids = self.attachments.check_attachments(str(step['content']))
@@ -424,9 +455,23 @@ class Cases:
             if (field_name.startswith('custom_') and 
                 field_name[7:] in self.mappings.step_fields and 
                 field_value):
-                for step in field_value:
-                    for step_field in ('content', 'expected', 'additional_info'):
-                        extract_from_text(step.get(step_field))
+                # Handle both JSON string format (type_id 13) and array format (type_id 10)
+                step_data = field_value
+                if isinstance(step_data, str):
+                    try:
+                        parsed_data = json.loads(step_data)
+                        if not isinstance(parsed_data, list):
+                            parsed_data = [parsed_data]
+                        step_data = parsed_data
+                    except (json.JSONDecodeError, TypeError):
+                        continue  # Invalid JSON, skip
+                elif not isinstance(step_data, list):
+                    continue  # Unexpected format, skip
+                
+                for step in step_data:
+                    if isinstance(step, dict):
+                        for step_field in ('content', 'expected', 'additional_info'):
+                            extract_from_text(step.get(step_field))
         
         return attachment_ids
 
@@ -485,7 +530,132 @@ class Cases:
             if field_name.startswith('custom_'):
                 normalized_name = self.__normalize_custom_field_name(field_name[len('custom_'):])
                 
-                # Look for project-specific field first
+                # Check if this is a step field FIRST (before checking custom_fields mappings)
+                # Step fields should be processed even if they're not in custom_fields mappings
+                base_name = normalized_name
+                if normalized_name.endswith(f"_{self.project['code']}"):
+                    base_name = normalized_name[:-len(f"_{self.project['code']}")]
+                
+                # If it's a step field, process it immediately and skip custom field processing
+                # Check if field exists and has data (not None, not empty string, not empty list)
+                has_step_data = case[field_name] is not None and (
+                    (isinstance(case[field_name], list) and len(case[field_name]) > 0) or
+                    (isinstance(case[field_name], str) and len(case[field_name].strip()) > 0)
+                )
+                is_step_field = base_name in self.mappings.step_fields and has_step_data
+                
+                if is_step_field:
+                    # Process step fields (handle project-specific variants)
+                    steps = []
+                    i = 1
+                    
+                    # Detect format: if it's a string, parse as JSON; if it's already a list, use directly
+                    step_data = case[field_name]
+                    if isinstance(step_data, str):
+                        # JSON string format (e.g., type_id 13 BDD scenario fields)
+                        try:
+                            parsed_data = json.loads(step_data)
+                            if not isinstance(parsed_data, list):
+                                parsed_data = [parsed_data]
+                            step_data = parsed_data
+                        except Exception as e:
+                            self.logger.log(
+                                f'[{self.project["code"]}][Tests] Case {case["title"]} has invalid JSON in step field {field_name}: {e}',
+                                'warning')
+                            continue
+                    elif not isinstance(step_data, list):
+                        # Unexpected format
+                        self.logger.log(
+                            f'[{self.project["code"]}][Tests] Case {case["title"]} has unexpected format for step field {field_name}: {type(step_data)}',
+                            'warning')
+                        continue
+                    
+                    # Process steps (now guaranteed to be a list)
+                    for step in step_data:
+                        # Check if this step references a shared step
+                        if 'shared_step_id' in step and step['shared_step_id']:
+                            shared_step_id = step['shared_step_id']
+                            # Look up the Qase shared step hash from mappings
+                            project_shared_steps = self.mappings.shared_steps.get(self.project['code'], {})
+                            qase_shared_step_hash = project_shared_steps.get(shared_step_id)
+                            
+                            if qase_shared_step_hash:
+                                # Create a shared step reference as a dict (Qase API format)
+                                steps.append({
+                                    'shared': qase_shared_step_hash
+                                })
+                                self.logger.log(f'[{self.project["code"]}][Tests] Case {case["title"]} step {i} references shared step TestRail ID {shared_step_id} -> Qase hash {qase_shared_step_hash}')
+                                i += 1
+                            else:
+                                # Shared step not found in mappings, log warning and process as regular step
+                                self.logger.log(f'[{self.project["code"]}][Tests] Case {case["title"]} step {i} references shared step TestRail ID {shared_step_id} but mapping not found. Processing as regular step.', 'warning')
+                                # Fall through to regular step processing below
+                                action = self.attachments.check_and_replace_attachments(step.get('content', ''), self.project['code'])
+                                expected = self.attachments.check_and_replace_attachments(step.get('expected', ''), self.project['code'])
+                                input_data = self.attachments.check_and_replace_attachments(step.get('additional_info', ''),
+                                                                                            self.project['code'])
+                                
+                                # Convert HTML to markdown for all step fields
+                                action = html_to_markdown(action, remove_html=False) if action else action
+                                expected = html_to_markdown(expected, remove_html=False) if expected else expected
+                                input_data = html_to_markdown(input_data, remove_html=False) if input_data else input_data
+
+                                action = action.strip()
+                                expected = expected.strip()
+                                input_data = input_data.strip()
+
+                                if (action != '' or (action == '' and expected != '')):
+                                    if action == '' or action == ' ':
+                                        action = 'No action'
+                                    steps.append(
+                                        TestStepCreate(
+                                            action=format_links_as_markdown(action, self.project['code'], self.config),
+                                            expected_result=format_links_as_markdown(expected, self.project['code'], self.config),
+                                            data=format_links_as_markdown(input_data, self.project['code'], self.config),
+                                            position=i,
+                                            attachments=[]  # Always use empty array, not None
+                                        )
+                                    )
+                                    i += 1
+                        else:
+                            # Regular step processing (no shared_step_id)
+                            # Process step fields: replace attachments, convert HTML to markdown, format links
+                            action = self.attachments.check_and_replace_attachments(step.get('content', ''), self.project['code'])
+                            expected = self.attachments.check_and_replace_attachments(step.get('expected', ''), self.project['code'])
+                            input_data = self.attachments.check_and_replace_attachments(step.get('additional_info', ''),
+                                                                                        self.project['code'])
+                            
+                            # Convert HTML to markdown for all step fields
+                            action = html_to_markdown(action, remove_html=False) if action else action
+                            expected = html_to_markdown(expected, remove_html=False) if expected else expected
+                            input_data = html_to_markdown(input_data, remove_html=False) if input_data else input_data
+
+                            action = action.strip()
+                            expected = expected.strip()
+                            input_data = input_data.strip()
+
+                            # Handle both formats: steps with only 'content' (JSON string format) and full step objects (array format)
+                            if (action != '' or (action == '' and expected != '')):
+                                if action == '' or action == ' ':
+                                    action = 'No action'
+                                steps.append(
+                                    TestStepCreate(
+                                        action=format_links_as_markdown(action, self.project['code'], self.config),
+                                        expected_result=format_links_as_markdown(expected, self.project['code'], self.config) if expected else None,
+                                        data=format_links_as_markdown(input_data, self.project['code'], self.config) if input_data else None,
+                                        position=i,
+                                        attachments=[]  # Always use empty array, not None
+                                    )
+                                )
+                                i += 1
+                            else:
+                                self.logger.log(f'[{self.project["code"]}][Tests] Case {case["title"]} has invalid step {step}',
+                                                'warning')
+                    if steps:
+                        data['steps'] = steps
+                    continue  # Skip custom field processing for step fields
+                
+                # Look for project-specific field first (skip if it's a step field)
                 project_specific_key = f"{normalized_name}_{self.project['code']}"
                 if project_specific_key in self.mappings.custom_fields and case[field_name]:
                     custom_field = self.mappings.custom_fields[project_specific_key]
@@ -567,7 +737,14 @@ class Cases:
                     else:
                         field_value = str(self.attachments.check_and_replace_attachments(case[field_name], self.project['code']))
                         field_value = html_to_markdown(field_value, remove_html=False)
-                        field_value = format_links_as_markdown(field_value, self.project['code'], self.config)
+                        
+                        # Don't format links as markdown for URL fields - they should remain plain URLs
+                        # Check if this is a URL field by checking the Qase field type mapping
+                        is_url_field = (custom_field.get('type_id') and 
+                                       custom_field['type_id'] in self.mappings.custom_fields_type and
+                                       self.mappings.custom_fields_type[custom_field['type_id']] == 7)  # 7 is Qase URL type
+                        if not is_url_field:
+                            field_value = format_links_as_markdown(field_value, self.project['code'], self.config)
                         
                         if normalized_name == 'preconds':
                             data['preconditions'] = field_value
@@ -576,8 +753,8 @@ class Cases:
                             data['custom_field'][str(custom_field['qase_id'])] = field_value
                             self.logger.log(f'[{self.project["code"]}][Tests] Set field "{custom_field["name"]}" to value: "{field_value}"')
                             
-                # Fallback to original field name for backward compatibility
-                elif normalized_name in self.mappings.custom_fields and case[field_name]:
+                # Fallback to original field name for backward compatibility (skip if it's a step field)
+                elif not is_step_field and normalized_name in self.mappings.custom_fields and case[field_name]:
                     custom_field = self.mappings.custom_fields[normalized_name]
                     self.logger.log(f'[{self.project["code"]}][Tests] Using global field {normalized_name} for case {case["title"]} with value: {case[field_name]}')
                     self.logger.log(f'[{self.project["code"]}][Tests] Field type: {custom_field["type_id"]} (6=selectbox, 12=multiselect)')
@@ -665,7 +842,14 @@ class Cases:
                         # Handle non-dropdown fields (text, number, etc.)
                         field_value = str(self.attachments.check_and_replace_attachments(case[field_name], self.project['code']))
                         field_value = html_to_markdown(field_value, remove_html=False)
-                        field_value = format_links_as_markdown(field_value, self.project['code'], self.config)
+                        
+                        # Don't format links as markdown for URL fields - they should remain plain URLs
+                        # Check if this is a URL field by checking the Qase field type mapping
+                        is_url_field = (custom_field.get('type_id') and 
+                                       custom_field['type_id'] in self.mappings.custom_fields_type and
+                                       self.mappings.custom_fields_type[custom_field['type_id']] == 7)  # 7 is Qase URL type
+                        if not is_url_field:
+                            field_value = format_links_as_markdown(field_value, self.project['code'], self.config)
                         
                         # Special handling for preconds field - only set preconditions system field, skip custom field
                         if normalized_name == 'preconds':
@@ -675,124 +859,8 @@ class Cases:
                             data['custom_field'][str(custom_field['qase_id'])] = field_value
                             self.logger.log(f'[{self.project["code"]}][Tests] Set global field {custom_field["name"]} to text value')
                 else:
+                    # Field not found in custom_fields mappings
                     self.logger.log(f'[{self.project["code"]}][Tests] No field found for {normalized_name} or {project_specific_key}')
-
-            if field_name[len('custom_'):] == 'testrail_bdd_scenario' and case[field_name] is not None:
-                steps = []
-                i = 1
-                try:
-                    parsed_data = json.loads(case[field_name])
-                except Exception as e:
-                    self.logger.log(
-                        f'[{self.project["code"]}][Tests] Case {case["title"]} has invalid step {case[field_name]}: {e}',
-                        'warning')
-                    continue
-                for step in parsed_data:
-                    if 'content' not in step:
-                        self.logger.log(f'[{self.project["code"]}][Tests] Case {case["title"]} has invalid step {step}',
-                                        'warning')
-                    else:
-                        # Process step: replace attachments, convert HTML to markdown, format links
-                        action = self.attachments.check_and_replace_attachments(step['content'], self.project['code'])
-                        action = html_to_markdown(action, remove_html=False)  # Convert HTML tags to markdown
-                        action = action.strip()
-
-                        if action == '' or action == ' ':
-                            action = 'No action'
-                        steps.append(
-                            TestStepCreate(
-                                action=format_links_as_markdown(action, self.project['code'], self.config),
-                                expected_result=None,
-                                position=i
-                            )
-                        )
-                        i += 1
-                else:
-                    self.logger.log(f'[{self.project["code"]}][Tests] Case {case["title"]} has invalid step {step}',
-                                    'warning')
-                data['steps'] = steps
-
-            if field_name[len('custom_'):] in self.mappings.step_fields and case[field_name]:
-                steps = []
-                i = 1
-                for step in case[field_name]:
-                    # Check if this step references a shared step
-                    if 'shared_step_id' in step and step['shared_step_id']:
-                        shared_step_id = step['shared_step_id']
-                        # Look up the Qase shared step hash from mappings
-                        project_shared_steps = self.mappings.shared_steps.get(self.project['code'], {})
-                        qase_shared_step_hash = project_shared_steps.get(shared_step_id)
-                        
-                        if qase_shared_step_hash:
-                            # Create a shared step reference as a dict (Qase API format)
-                            steps.append({
-                                'shared': qase_shared_step_hash
-                            })
-                            self.logger.log(f'[{self.project["code"]}][Tests] Case {case["title"]} step {i} references shared step TestRail ID {shared_step_id} -> Qase hash {qase_shared_step_hash}')
-                            i += 1
-                        else:
-                            # Shared step not found in mappings, log warning and process as regular step
-                            self.logger.log(f'[{self.project["code"]}][Tests] Case {case["title"]} step {i} references shared step TestRail ID {shared_step_id} but mapping not found. Processing as regular step.', 'warning')
-                            # Fall through to regular step processing below
-                            action = self.attachments.check_and_replace_attachments(step.get('content', ''), self.project['code'])
-                            expected = self.attachments.check_and_replace_attachments(step.get('expected', ''), self.project['code'])
-                            input_data = self.attachments.check_and_replace_attachments(step.get('additional_info', ''),
-                                                                                        self.project['code'])
-                            
-                            # Convert HTML to markdown for all step fields
-                            action = html_to_markdown(action, remove_html=False) if action else action
-                            expected = html_to_markdown(expected, remove_html=False) if expected else expected
-                            input_data = html_to_markdown(input_data, remove_html=False) if input_data else input_data
-
-                            action = action.strip()
-                            expected = expected.strip()
-                            input_data = input_data.strip()
-
-                            if (action != '' or (action == '' and expected != '')):
-                                if action == '' or action == ' ':
-                                    action = 'No action'
-                                steps.append(
-                                    TestStepCreate(
-                                        action=format_links_as_markdown(action, self.project['code'], self.config),
-                                        expected_result=format_links_as_markdown(expected, self.project['code'], self.config),
-                                        data=format_links_as_markdown(input_data, self.project['code'], self.config),
-                                        position=i
-                                    )
-                                )
-                                i += 1
-                    else:
-                        # Regular step processing (no shared_step_id)
-                        # Process step fields: replace attachments, convert HTML to markdown, format links
-                        action = self.attachments.check_and_replace_attachments(step.get('content', ''), self.project['code'])
-                        expected = self.attachments.check_and_replace_attachments(step.get('expected', ''), self.project['code'])
-                        input_data = self.attachments.check_and_replace_attachments(step.get('additional_info', ''),
-                                                                                    self.project['code'])
-                        
-                        # Convert HTML to markdown for all step fields
-                        action = html_to_markdown(action, remove_html=False) if action else action
-                        expected = html_to_markdown(expected, remove_html=False) if expected else expected
-                        input_data = html_to_markdown(input_data, remove_html=False) if input_data else input_data
-
-                        action = action.strip()
-                        expected = expected.strip()
-                        input_data = input_data.strip()
-
-                        if (action != '' or (action == '' and expected != '')):
-                            if action == '' or action == ' ':
-                                action = 'No action'
-                            steps.append(
-                                TestStepCreate(
-                                    action=format_links_as_markdown(action, self.project['code'], self.config),
-                                    expected_result=format_links_as_markdown(expected, self.project['code'], self.config),
-                                    data=format_links_as_markdown(input_data, self.project['code'], self.config),
-                                    position=i
-                                )
-                            )
-                            i += 1
-                        else:
-                            self.logger.log(f'[{self.project["code"]}][Tests] Case {case["title"]} has invalid step {step}',
-                                            'warning')
-                data['steps'] = steps
         return data
 
     # Done. Method validates if custom field value exists (skip)
