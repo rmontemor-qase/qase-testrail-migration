@@ -214,6 +214,7 @@ class Cases:
             data = self._set_refs(case=case, data=data)
             data = self._set_milestone(case=case, data=data, code=self.project['code'])
             data = self._set_estimate(case=case, data=data)
+            data = self._set_assigned_to(case=case, data=data)
             
             # Store JIRA issues for later attachment (if any)
             if '_jira_issues' in data and data['_jira_issues']:
@@ -997,6 +998,21 @@ class Cases:
                 self.logger.log(f'[{self.project["code"]}][Tests] Case {case["title"]} has no estimate value')
         else:
             self.logger.log(f'[{self.project["code"]}][Tests] Estimate field not available in mappings')
+        return data
+
+    def _set_assigned_to(self, case: dict, data: dict) -> dict:
+        """Set assigned to field with mapped user ID"""
+        if hasattr(self.mappings, 'assigned_to_field_id') and self.mappings.assigned_to_field_id:
+            # Check if case has case_assignedto_id field
+            if 'case_assignedto_id' in case and case['case_assignedto_id']:
+                # Map TestRail user ID to Qase user ID
+                assigned_user_id = self.mappings.get_user_id(case['case_assignedto_id'])
+                data['custom_field'][str(self.mappings.assigned_to_field_id)] = str(assigned_user_id)
+                self.logger.log(f'[{self.project["code"]}][Tests] Set assigned to field to user ID: {assigned_user_id} (TestRail user ID: {case["case_assignedto_id"]})')
+            else:
+                self.logger.log(f'[{self.project["code"]}][Tests] Case {case["title"]} has no assigned user')
+        else:
+            self.logger.log(f'[{self.project["code"]}][Tests] Assigned To field not available in mappings')
         return data
 
 

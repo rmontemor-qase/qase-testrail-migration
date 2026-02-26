@@ -83,6 +83,7 @@ class Fields:
         await self._create_refs_field(qase_custom_fields)
         await self._create_testrail_original_id_field(qase_custom_fields)
         await self._create_estimate_field(qase_custom_fields)
+        await self._create_assigned_to_field(qase_custom_fields)
         
         # Print detailed summary of all custom fields
         self._print_custom_fields_summary()
@@ -558,6 +559,27 @@ class Fields:
                 'is_enabled_for_all_projects': True,
             }
             self.mappings.estimate_field_id = await self.pools.qs(self.qase.create_custom_field, data)
+
+    async def _create_assigned_to_field(self, qase_custom_fields):
+        """Create Assigned To custom field for storing assigned user"""
+        if qase_custom_fields and len(qase_custom_fields) > 0:
+            for qase_field in qase_custom_fields:
+                if qase_field.title == 'Assigned To':
+                    self.logger.log('Assigned To field found')
+                    self.mappings.assigned_to_field_id = qase_field.id
+        
+        if not hasattr(self.mappings, 'assigned_to_field_id') or not self.mappings.assigned_to_field_id:
+            self.logger.log('[Fields] Assigned To field not found. Creating a new one')
+            data = {
+                'title': 'Assigned To',
+                'entity': 0, # 0 - case, 1 - run, 2 - defect,
+                'type': 8, # 8 - user
+                'is_filterable': True,
+                'is_visible': True,
+                'is_required': False,
+                'is_enabled_for_all_projects': True,
+            }
+            self.mappings.assigned_to_field_id = await self.pools.qs(self.qase.create_custom_field, data)
 
     async def _create_types_map(self):
         self.logger.log('[Fields] Creating types map')

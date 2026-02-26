@@ -140,7 +140,10 @@ def format_links_as_markdown(text, project_code=None, config=None):
         text = replace_testrail_case_links(text, project_code, config)
         
         # Format URLs as Markdown links (this may convert broken Qase URLs to markdown)
-        url_pattern = re.compile(r'(?<!\]\()(?<!\])\b(http[s]?://[^\s]+)')
+        # Pattern: Match URLs that are NOT already inside markdown links
+        # Avoid matching URLs inside [brackets] or (parentheses) of existing markdown links
+        # Simple approach: don't match if preceded by [ or ](, and don't match if followed by ] or )
+        url_pattern = re.compile(r'(?<!\[)(?<!\]\()\b(http[s]?://[^\s\)\]]+)(?![\]\)])')
         text = url_pattern.sub(r'[\1](\1)', text)
         
         # After URL pattern converts plain URLs to markdown, fix any broken Qase links
@@ -148,7 +151,10 @@ def format_links_as_markdown(text, project_code=None, config=None):
         text = replace_testrail_case_links(text, project_code, config)
     else:
         # Format URLs as Markdown links
-        url_pattern = re.compile(r'(?<!\]\()(?<!\])\b(http[s]?://[^\s]+)')
+        # Pattern: Match URLs that are NOT already inside markdown links
+        # Avoid matching URLs inside [brackets] or (parentheses) of existing markdown links
+        # Simple approach: don't match if preceded by [ or ](, and don't match if followed by ] or )
+        url_pattern = re.compile(r'(?<!\[)(?<!\]\()\b(http[s]?://[^\s\)\]]+)(?![\]\)])')
         text = url_pattern.sub(r'[\1](\1)', text)
 
     return text
@@ -677,8 +683,14 @@ def html_to_markdown(html_text, remove_html=False):
         else:
             # Convert to markdown
             markdown_text = h.handle(html_text)
-            # Clean up extra whitespace
+            # Clean up extra whitespace - especially fix list spacing
+            # Remove blank lines between list items
+            markdown_text = re.sub(r'(\n[-*] .+?)\n+(\n[-*] )', r'\1\2', markdown_text)
+            markdown_text = re.sub(r'(\n[-*] .+?)\n{2,}(\n[-*] )', r'\1\n\2', markdown_text)
+            # Remove multiple consecutive newlines (3+ becomes 2)
             markdown_text = re.sub(r'\n{3,}', '\n\n', markdown_text)
+            # Remove trailing whitespace from each line
+            markdown_text = re.sub(r'[ \t]+$', '', markdown_text, flags=re.MULTILINE)
             return markdown_text.strip()
     except ImportError:
         # Fallback to BeautifulSoup if html2text is not available
@@ -713,8 +725,26 @@ def html_to_markdown(html_text, remove_html=False):
                 text = re.sub(r'<br\s*/?>', '\n', text, flags=re.IGNORECASE)
                 
                 # Convert <ul> and <ol> lists
-                text = re.sub(r'<li[^>]*>(.*?)</li>', r'- \1\n', text, flags=re.DOTALL | re.IGNORECASE)
-                text = re.sub(r'<ul[^>]*>|</ul>|<ol[^>]*>|</ol>', '\n', text, flags=re.IGNORECASE)
+                # First, normalize list structure by removing extra whitespace in list tags
+                text = re.sub(r'<ul[^>]*>\s*', '<ul>', text, flags=re.IGNORECASE)
+                text = re.sub(r'<ol[^>]*>\s*', '<ol>', text, flags=re.IGNORECASE)
+                text = re.sub(r'\s*</ul>', '</ul>', text, flags=re.IGNORECASE)
+                text = re.sub(r'\s*</ol>', '</ol>', text, flags=re.IGNORECASE)
+                
+                # Convert <li> items - strip whitespace and add single newline
+                # Use a function to properly handle content and spacing
+                def convert_list_item(match):
+                    content = match.group(1).strip()
+                    return f'- {content}\n'
+                
+                text = re.sub(r'<li[^>]*>(.*?)</li>', convert_list_item, text, flags=re.DOTALL | re.IGNORECASE)
+                
+                # Convert list container tags - add newline only before opening tag and after closing tag
+                # But ensure we don't add extra newlines if they already exist
+                text = re.sub(r'<ul[^>]*>', '\n', text, flags=re.IGNORECASE)
+                text = re.sub(r'</ul>', '\n', text, flags=re.IGNORECASE)
+                text = re.sub(r'<ol[^>]*>', '\n', text, flags=re.IGNORECASE)
+                text = re.sub(r'</ol>', '\n', text, flags=re.IGNORECASE)
                 
                 # Convert <h1> to #
                 text = re.sub(r'<h1[^>]*>(.*?)</h1>', r'# \1\n\n', text, flags=re.DOTALL | re.IGNORECASE)
@@ -728,9 +758,18 @@ def html_to_markdown(html_text, remove_html=False):
                 import html
                 text = html.unescape(text)
                 
-                # Clean up extra whitespace
+                # Clean up extra whitespace - especially fix list spacing
+                # Remove blank lines between list items (lines that are just whitespace between lines starting with - or *)
+                # This pattern matches: list item, then one or more blank lines, then another list item
+                text = re.sub(r'(\n[-*] .+?)\n+(\n[-*] )', r'\1\2', text)
+                # Also handle cases where there are blank lines after list items but before the next list item
+                text = re.sub(r'(\n[-*] .+?)\n{2,}(\n[-*] )', r'\1\n\2', text)
+                # Remove multiple consecutive newlines (3+ becomes 2)
                 text = re.sub(r'\n{3,}', '\n\n', text)
+                # Normalize spaces/tabs
                 text = re.sub(r'[ \t]+', ' ', text)
+                # Remove trailing whitespace from each line
+                text = re.sub(r'[ \t]+$', '', text, flags=re.MULTILINE)
                 
                 return text.strip()
         except ImportError:
@@ -753,9 +792,44 @@ def html_to_markdown(html_text, remove_html=False):
                 text = re.sub(r'<i[^>]*>(.*?)</i>', r'*\1*', text, flags=re.DOTALL | re.IGNORECASE)
                 # Convert <a href="...">text</a> to [text](url)
                 text = re.sub(r'<a[^>]*href=["\']([^"\']*)["\'][^>]*>(.*?)</a>', r'[\2](\1)', text, flags=re.DOTALL | re.IGNORECASE)
+                
+                # Convert <ul> and <ol> lists
+                # Normalize list structure
+                text = re.sub(r'<ul[^>]*>\s*', '<ul>', text, flags=re.IGNORECASE)
+                text = re.sub(r'<ol[^>]*>\s*', '<ol>', text, flags=re.IGNORECASE)
+                text = re.sub(r'\s*</ul>', '</ul>', text, flags=re.IGNORECASE)
+                text = re.sub(r'\s*</ol>', '</ol>', text, flags=re.IGNORECASE)
+                
+                # Convert <li> items
+                def convert_list_item(match):
+                    content = match.group(1).strip()
+                    return f'- {content}\n'
+                
+                text = re.sub(r'<li[^>]*>(.*?)</li>', convert_list_item, text, flags=re.DOTALL | re.IGNORECASE)
+                
+                # Convert list container tags
+                text = re.sub(r'<ul[^>]*>', '\n', text, flags=re.IGNORECASE)
+                text = re.sub(r'</ul>', '\n', text, flags=re.IGNORECASE)
+                text = re.sub(r'<ol[^>]*>', '\n', text, flags=re.IGNORECASE)
+                text = re.sub(r'</ol>', '\n', text, flags=re.IGNORECASE)
+                
                 # Remove all remaining HTML tags
                 text = re.sub(r'<[^>]+>', '', text)
                 # Decode HTML entities
                 import html
                 text = html.unescape(text)
+                
+                # Clean up extra whitespace - especially fix list spacing
+                # Remove blank lines between list items (lines that are just whitespace between lines starting with - or *)
+                # This pattern matches: list item, then one or more blank lines, then another list item
+                text = re.sub(r'(\n[-*] .+?)\n+(\n[-*] )', r'\1\2', text)
+                # Also handle cases where there are blank lines after list items but before the next list item
+                text = re.sub(r'(\n[-*] .+?)\n{2,}(\n[-*] )', r'\1\n\2', text)
+                # Remove multiple consecutive newlines (3+ becomes 2)
+                text = re.sub(r'\n{3,}', '\n\n', text)
+                # Normalize spaces/tabs
+                text = re.sub(r'[ \t]+', ' ', text)
+                # Remove trailing whitespace from each line
+                text = re.sub(r'[ \t]+$', '', text, flags=re.MULTILINE)
+                
                 return text.strip()
