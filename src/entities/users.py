@@ -1,4 +1,5 @@
 import asyncio
+import sys
 
 from ..service import QaseService, QaseScimService, TestrailService
 from ..support import Logger, Mappings, ConfigManager as Config, Pools
@@ -79,23 +80,26 @@ class Users:
             self.scim.add_user_to_group(self.mappings.group_id, id)
 
     async def create_users(self):
+        # 1. Fetch: show progress on console so user sees we're loading before any prompt
+        print("[Users] Loading users from Qase (SCIM)...", flush=True)
         self.logger.log("[Users] Loading users from Qase using SCIM")
-        qase_users_generator = await self.pools.qs_gen_all(self.scim.get_all_users)
-        
-        # Collect all Qase users into a list
-        all_qase_users = []
-        for user_batch in qase_users_generator:
-            if isinstance(user_batch, list):
-                all_qase_users.extend(user_batch)
+        all_qase_users = await self.pools.qs_gen_all(self.scim.get_all_users)
+        if not isinstance(all_qase_users, list):
+            all_qase_users = list(all_qase_users) if hasattr(all_qase_users, '__iter__') else [all_qase_users]
+        # Flatten if we got list of lists (from async_gen_all reduce)
+        flattened = []
+        for x in all_qase_users:
+            if isinstance(x, list):
+                flattened.extend(x)
             else:
-                all_qase_users.append(user_batch)
+                flattened.append(x)
+        all_qase_users = flattened
 
-        # Collect users that will be created
+        # 2. Compute which users will be created (no prompt yet)
         users_to_create = []
         for testrail_user in self.testrail_users:
             flag = False
             for qase_user in all_qase_users:
-                # Handle both dict and object formats
                 qase_email = qase_user.get('userName', '').lower() if isinstance(qase_user, dict) else getattr(qase_user, 'userName', '').lower()
                 if testrail_user['email'].lower() == qase_email:
                     self.logger.log("[Users] User found in Qase using SCIM, skipping creation.")
@@ -105,24 +109,22 @@ class Users:
                         self.active_ids.append(qase_user_id)
                     flag = True
             if not flag:
-                # Not found, will need to create
                 if testrail_user['is_active'] is False and not self.config.get('users.inactive'):
                     self.logger.log(f"[Users] User {testrail_user['email']} is not active, skipping creation.")
                     continue
-                # Add to list of users to create
                 users_to_create.append(testrail_user)
 
-        # Display confirmation summary if users will be created
+        # 3. Only then: show list on console and ask for confirmation
         if self.config.get('users.create') and len(users_to_create) > 0:
             self._display_user_creation_summary(users_to_create, all_qase_users)
-            
-            # Prompt for confirmation
+            sys.stdout.flush()
+            sys.stderr.flush()
             confirmation = input("\n[Users] Type 'yes' to proceed with user creation: ").strip().lower()
             if confirmation != 'yes':
                 self.logger.log("[Users] User creation cancelled by user. Skipping user creation.")
                 return
-        
-        # Proceed with user creation if confirmed
+
+        # 4. Proceed with user creation only if user confirmed
         if self.config.get('users.create') and len(users_to_create) > 0:
             async with asyncio.TaskGroup() as tg:
                 for testrail_user in users_to_create:
@@ -134,23 +136,24 @@ class Users:
                         continue
 
     def _display_user_creation_summary(self, users_to_create, qase_users):
-        """Display summary of users that will be created"""
-        self.logger.divider()
-        self.logger.log("=" * 80)
-        self.logger.log("USER CREATION SUMMARY")
-        self.logger.log("=" * 80)
-        
-        # Get TestRail URL
+        """Display summary of users that will be created (to console and log)."""
+        def out(msg):
+            print(msg, flush=True)
+            self.logger.log(msg.strip())
+
+        out("")
+        out("=" * 80)
+        out("USER CREATION SUMMARY")
+        out("=" * 80)
+
         testrail_host = self.config.get('testrail.api.host') or 'N/A'
-        self.logger.log(f"\nSource TestRail URL: {testrail_host}")
-        
-        # Display existing Qase users
-        self.logger.log(f"\nExisting Qase Users ({len(qase_users)}):")
+        out(f"\nSource TestRail URL: {testrail_host}")
+
+        out(f"\nExisting Qase Users ({len(qase_users)}):")
         if len(qase_users) > 0:
-            self.logger.log("-" * 80)
-            # Sort by email for easier reading
+            out("-" * 80)
             sorted_users = sorted(qase_users, key=lambda u: u.get('userName', '').lower() if isinstance(u, dict) else getattr(u, 'userName', '').lower())
-            for i, qase_user in enumerate(sorted_users[:50], 1):  # Limit to first 50 for readability
+            for i, qase_user in enumerate(sorted_users[:50], 1):
                 if isinstance(qase_user, dict):
                     email = qase_user.get('userName', 'N/A')
                     name = qase_user.get('name', {})
@@ -160,9 +163,8 @@ class Users:
                         full_name = str(name) if name else 'N/A'
                     active = qase_user.get('active', True)
                     status = "Active" if active else "Inactive"
-                    self.logger.log(f"  {i}. {full_name} ({email}) - {status}")
+                    out(f"  {i}. {full_name} ({email}) - {status}")
                 else:
-                    # Handle object with attributes
                     email = getattr(qase_user, 'userName', 'N/A')
                     name = getattr(qase_user, 'name', None)
                     if name:
@@ -171,43 +173,40 @@ class Users:
                         full_name = 'N/A'
                     active = getattr(qase_user, 'active', True)
                     status = "Active" if active else "Inactive"
-                    self.logger.log(f"  {i}. {full_name} ({email}) - {status}")
-            
+                    out(f"  {i}. {full_name} ({email}) - {status}")
             if len(qase_users) > 50:
-                self.logger.log(f"  ... and {len(qase_users) - 50} more users")
-            self.logger.log("-" * 80)
+                out(f"  ... and {len(qase_users) - 50} more users")
+            out("-" * 80)
         else:
-            self.logger.log("  No existing users found in Qase workspace")
-            self.logger.log("-" * 80)
-        
-        # Display users to be created
-        self.logger.log(f"\nUsers to be created in Qase: {len(users_to_create)}")
-        self.logger.log("-" * 80)
-        
-        # Group by active/inactive status
+            out("  No existing users found in Qase workspace")
+            out("-" * 80)
+
+        out(f"\nUsers to be created in Qase: {len(users_to_create)}")
+        out("-" * 80)
+
         active_users = [u for u in users_to_create if u.get('is_active', True)]
         inactive_users = [u for u in users_to_create if not u.get('is_active', True)]
-        
+
         if active_users:
-            self.logger.log(f"\nActive Users ({len(active_users)}):")
+            out(f"\nActive Users ({len(active_users)}):")
             for i, user in enumerate(active_users, 1):
                 name = user.get('name', 'N/A')
                 email = user.get('email', 'N/A')
                 role = user.get('role', 'N/A')
-                self.logger.log(f"  {i}. {name} ({email}) - Role: {role}")
-        
+                out(f"  {i}. {name} ({email}) - Role: {role}")
+
         if inactive_users:
-            self.logger.log(f"\nInactive Users ({len(inactive_users)}):")
+            out(f"\nInactive Users ({len(inactive_users)}):")
             for i, user in enumerate(inactive_users, 1):
                 name = user.get('name', 'N/A')
                 email = user.get('email', 'N/A')
                 role = user.get('role', 'N/A')
-                self.logger.log(f"  {i}. {name} ({email}) - Role: {role} [INACTIVE]")
-        
-        self.logger.log("-" * 80)
-        self.logger.log(f"Total: {len(users_to_create)} users")
-        self.logger.log("=" * 80)
-        self.logger.divider()
+                out(f"  {i}. {name} ({email}) - Role: {role} [INACTIVE]")
+
+        out("-" * 80)
+        out(f"Total: {len(users_to_create)} users")
+        out("=" * 80)
+        out("")
 
     async def import_user(self, testrail_user):
         user_id = await self.create_user(testrail_user)
