@@ -54,6 +54,13 @@ class Runs:
         async with asyncio.TaskGroup() as tg:
             tg.create_task(self._build_runs_index())
             tg.create_task(self._build_plans_index())
+        total_before_filter = len(self.index)
+        if self.created_after is not None and self.created_after > 0:
+            self.index = [r for r in self.index if (r.get('created_on') or 0) >= self.created_after]
+            self.logger.log(
+                f'[{self.project["code"]}][Runs] Filtered by created_after (>= {self.created_after}): '
+                f'{len(self.index)} runs (from {total_before_filter} total)'
+            )
         self.mappings.stats.add_entity_count(self.project['code'], 'runs', 'testrail', len(self.index))
 
     async def _build_runs_index(self) -> None:
@@ -94,11 +101,13 @@ class Runs:
         self.logger.log(f'[{self.project["code"]}][Runs] Building plans index')
         limit = 250
         offset = 0
+        plans_processed = 0
 
         while True:
             self.logger.log(f'[{self.project["code"]}][Runs] Fetching plans from TestRail')
             plans = await self.pools.tr(self.testrail.get_plans, self.project['testrail_id'], limit, offset)
             for plan in plans['plans']:
+                plans_processed += 1
                 plan = self.testrail.get_plan(plan['id'])
                 if plan is not None and 'entries' in plan and plan['entries'] and len(plan['entries']) > 0:
                     self.logger.log(f'[{self.project["code"]}][Runs] Fetching runs for plan {plan["id"]}')
@@ -117,6 +126,10 @@ class Runs:
                                 'milestone_id': run['milestone_id'],
                                 'author_id': self.mappings.get_user_id(run['created_by']),
                             })
+                if plans_processed % 50 == 0:
+                    msg = f'[{self.project["code"]}][Runs] Processed {plans_processed} plans, {len(self.index)} runs in index so far'
+                    self.logger.log(msg)
+                    print(f'  {msg}', flush=True)
             if plans['size'] < limit:
                 break
 

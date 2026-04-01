@@ -9,6 +9,7 @@ class TestRailImporterSync:
         self.pools = Pools(
             qase_pool=ThrottledThreadPoolExecutor(max_workers=8, requests=230, interval=10),
             tr_pool=ThreadPoolExecutor(max_workers=8),
+            logger=logger,
         )
 
         self.logger = logger
